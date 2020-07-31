@@ -1,0 +1,212 @@
+---
+title: "Gates Foundation Ag Development Grantees"
+author: "Matt Gunther"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    css: style.css
+runtime: shiny
+vignette: >
+  %\VignetteIndexEntry{Shiny_bmgfScrape}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+**Welcome!** This application will conduct a webscrape of the Bill & Melinda Gates Foundation grantees in the [Agricultural Development issue area](https://www.gatesfoundation.org/how-we-work/quick-links/grants-database#q/issue=Agricultural%20Development). 
+
+Instructions:
+
+1. Declare the number of grantees to include in your scrape. If you declare more than the total number of grantees listed, the function will stop when it reaches the last one. *CAUTION: scraping all grantees is possible, but very slow: just declare a large number (e.g. 100000)*.
+2. Click the "Start scrape". A status bar will report progress.
+3. When the scrape is finished, results will be displayed in a table. 
+4. Want more data? Increase the number of granttees and click "Start scrape" again.
+5. When finished, click "Download results"
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(httr)
+library(tidyverse)
+library(shiny)
+library(rvest)
+library(webshot)
+library(DT)
+```
+
+```{r}
+getURLs <- function() {
+  my_headers <- c(
+    `User-Agent` = 'Mozilla/5.0 (Windows NT 10.0; rv:68.0) Gecko/20100101 Firefox/68.0', 
+    Accept = '*/*',
+    `Accept-Language` = 'en-US,en;q=0.5 --compressed', 
+    `Content-Type` = 'application/json; charset=utf-8;',
+    `X-Requested-With` = 'XMLHttpRequest',
+    Origin = 'https://www.gatesfoundation.org',
+    DNT = '1',
+    Referer = 'https://www.gatesfoundation.org/how-we-work/quick-links/grants-database',
+    Connection = 'keep-alive',
+    Cookie = "gfo#lang=en; PrivacyPolicy=true",
+    Pragma = 'no-cache', 
+    `Cache-Control` = 'no-cache --data-raw '
+  )
+  
+  my_body <- list(
+    freeTextQuery = "",
+    fieldQueries = '(@gfotopics=="Agricultural Development") and (@gfomediatype=="Grant")',
+    facetsToRender = c(
+      "gfocategories",
+      "gfotopics",
+      "gfoyear",
+      "gforegions"
+    ),
+    page = "1",
+    resultsPerPage = "10000",
+    sortBy = "gfodate",
+    sortDirection = "desc"
+  )
+  
+  my_cookies <- c(
+    `SC_ANALYTICS_GLOBAL_COOKIE` = "b1e3806fff8247dfb3561f9c9db78e94|False",
+    `__atuvc` = "5%7C19%2C0%7C20%2C13%7C21",
+    `_ga` = "GA1.2.1987126873.1561408353",
+    `PrivacyPolicy` = "true", 
+    `_fbp` = "fb.1.1588964284990.1296154462", 
+    `gfo#lang` = "en", 
+    `RT` = "z=1&dm=gatesfoundation.org&si=8slesfzqatr&ss=kaef9147&sl=0&tt=0", 
+    `_gid` = "GA1.2.1444039013.1589917716", 
+    `__atuvs`= "5ec44cd65f05c3c3009", 
+    `_gat_UA-113054079-4` = "1"
+  )
+  
+  r <- POST(
+    "https://www.gatesfoundation.org/services/gfo/search.ashx",
+    # verbose(),
+    config = list(
+      add_headers(my_headers),
+      set_cookies(my_cookies)),
+    encode = "json",
+    body = my_body
+  ) 
+
+  suppressMessages({
+    URLs <- map_chr(parsed_content(r)$results, ~{
+      .x%>%
+        flatten()%>%
+        .$url%>%
+        paste0("https://www.gatesfoundation.org/", .)
+    })
+  })
+  
+  return(URLs)
+}
+
+```
+
+```{r, eval=T}
+shinyApp(
+  ui = fluidPage(
+    tags$head(tags$style(".shiny-notification {position: fixed; top: 0; right:0 ; width: 500px")),
+    sidebarLayout(
+      sidebarPanel(
+        numericInput(
+          "pages", 
+          label = "How many grantees would you like to scrape?",
+          value = 1
+        ),
+        shiny::actionButton(
+          inputId = "scrape",
+          label = "Start scrape", 
+          icon = icon("refresh")
+        ),
+        shiny::downloadButton(
+          outputId = "dwn",
+          label = "Download results"
+        )
+      ),
+      mainPanel(
+         DT::DTOutput("dat", )
+      )
+    )
+  ),
+
+  server = function(input, output){
+    observeEvent(input$scrape, {
+      withProgress(
+        message = 'Scraping Grantees', 
+        value = 0, 
+        {
+          URLs <- getURLs()
+          
+          CSS <- c(
+            ".articleWrapper h2",
+            "#bodyregion_0_interiorarticle_0_lblDate",
+            "#bodyregion_0_interiorarticle_0_lblPurpose",
+            "#bodyregion_0_interiorarticle_0_lblAmount",
+            "#bodyregion_0_interiorarticle_0_lblTerm",
+            "#bodyregion_0_interiorarticle_0_lblTopic",
+            "#bodyregion_0_interiorarticle_0_lblRegion",
+            "#bodyregion_0_interiorarticle_0_lblProgram",
+            "#bodyregion_0_interiorarticle_0_lblLocation",
+            "#bodyregion_0_interiorarticle_0_lblSite a"
+          )
+          
+          grantees <- data.frame(
+            "grantee_name" = character(),
+            "date"= character(),
+            "purpose"= character(),
+            "amount"= character(),
+            "term"= character(),
+            "topic"= character(),
+            "regions_served"= character(),
+            "program"= character(),
+            "grantee_location"= character(),
+            "grantee_website"= character(),
+            stringsAsFactors=FALSE
+          )
+          
+          for(pg in 1:min(input$pages, length(URLs))){
+            new_row <- map(CSS, ~{
+              read_html(as.character(URLs[pg])) %>%
+                html_nodes(.x)%>%
+                html_text()
+            })
+            
+            grantees <- map(new_row, ~{
+              if(length(.x) == 0){
+                .x <- NA
+              } else {
+                .x <- .x
+              }
+            })%>%
+              set_names(names(grantees))%>%
+              bind_rows(grantees)
+            
+            incProgress(1/input$pages)
+
+            
+          }
+
+          output$dat = DT::renderDataTable(
+            grantees%>%arrange(-row_number())
+          )
+          
+          output$dwn <- downloadHandler(
+            filename = function() {
+              paste0('bmgf-', 
+                    Sys.Date(), 
+                    '.csv')
+            },
+            content = function(file){
+              write.csv(grantees, file)
+            }
+          )
+          
+        }
+      )
+    })
+  }
+)
+
+
+
+```
